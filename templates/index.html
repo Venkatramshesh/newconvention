@@ -1,0 +1,22 @@
+{% import "bootstrap/wtf.html" as wtf %}
+
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+ <style>
+body {
+  background-image: url('static/img/Image.png');
+}
+</style>
+
+</head>
+<body>
+<h2>Welcome to the Charleston Salsa covention. Please enter your name and email below for the raffle contest</h2>
+ <style="background-image: url('static/img/Image.gif')">
+<form method="post">
+{{ form.csrf_token }}
+    </form>
+  {{ wtf.quick_form(form) }}
+
+</body>
+</html>
