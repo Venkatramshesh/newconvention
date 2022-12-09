@@ -6,94 +6,103 @@ import os
 from form import SubmitForm
 from flask_bootstrap import Bootstrap
 import boto3
+from botocore.exceptions import ClientError
+from flaskext.mysql import MySQL
 
 
-application = Flask(__name__)
-Bootstrap(application)
-application.config['SECRET_KEY'] = 'jCOo4PAnmU6A0j2lpKeI-A'
+secret_name = "convention"
+region_name = "us-east-1"
+access_key = os.getenv('accesskeyid')
+access_secret = os.environ.get('accesskeysecret')
+# Create a Secrets Manager client
+session = boto3.session.Session()
 
-# os.environ['AWS_PROFILE'] = "iamadmin-general"
-# os.environ['AWS_DEFAULT_REGION'] = "us-east-1"
 
-AWS_region = 'us-east-1'
-AWS_owner = 'iamadmin-general'
-
-dynamodb = boto3.resource('dynamodb', region_name=AWS_region)
-
-# app.config['SQLALCHEMY_DATABASE_URI'] =  "sqlite:///raffle.db"
-# db = SQLAlchemy(app)
-
-def create_raffles_table(dynamodb=None):
-    dynamodb = boto3.resource('dynamodb', region_name=AWS_region)
-    #dynamodb = boto3.resource('dynamodb', endpoint_url="http://localhost:8000")
-    # Table defination
-    table = dynamodb.create_table(
-        TableName='raffle',
-        KeySchema=[
-            {
-                'AttributeName': 'name',
-                'KeyType': 'HASH'  # Partition key
-            },
-            {
-                'AttributeName': 'email',
-                'KeyType': 'RANGE'  # Sort key
-            }
-        ],
-        AttributeDefinitions=[
-            {
-                'AttributeName': 'name',
-                # AttributeType defines the data type. 'S' is string type and 'N' is number type
-                'AttributeType': 'S'
-            },
-            {
-                'AttributeName': 'email',
-                'AttributeType': 'S'
-            },
-        ],
-        ProvisionedThroughput={
-            # ReadCapacityUnits set to 10 strongly consistent reads per second
-            'ReadCapacityUnits': 10,
-            'WriteCapacityUnits': 10  # WriteCapacityUnits set to 10 writes per second
-        }
-    )
+client = session.client(service_name='secretsmanager', region_name=region_name,aws_access_key_id=access_key, aws_secret_access_key=access_secret)
 
 try:
-    create_raffles_table()
-except:
-    print("Table already exixts")
+    get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+except ClientError as e:
+        # For a list of exceptions thrown, see
+        # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
+    raise e
 
-# class comments(db.Model):
-#     id = db.Column(db.Integer, primary_key=True)
-#     email = db.Column(db.String, unique=True, nullable=False)
-#     name = db.Column(db.String, unique=True, nullable=False)
+    # Decrypts secret using the associated KMS key.
+secret = get_secret_value_response['SecretString']
 
-# with app.app_context():
-#     db.create_all()
+app = Flask(__name__)
+Bootstrap(app)
+app.config['SECRET_KEY'] = 'jCOo4PAnmU6A0j2lpKeI-A'
 
-@application.route('/',methods=["GET","POST"])
+db_endpoint = open("/home/ec2-user/dbserver.endpoint", 'r', encoding='UTF-8')
+#db_endpoint="aws-database-web.cax8xbchtiwa.us-east-1.rds.amazonaws.com"
+# Configure mysql database
+app.config['MYSQL_DATABASE_HOST'] = db_endpoint.readline().strip()
+app.config['MYSQL_DATABASE_USER'] = 'admin'
+app.config['MYSQL_DATABASE_PASSWORD'] = secret[13:29]
+app.config['MYSQL_DATABASE_DB'] = 'convention'
+app.config['MYSQL_DATABASE_PORT'] = 3306
+#db_endpoint.close()
+
+mysql = MySQL()
+mysql.init_app(app)
+connection = mysql.connect()
+connection.autocommit(True)
+cursor = connection.cursor()
+
+def init_convention_db():
+    drop_table = 'DROP TABLE IF EXISTS convention.convention;'
+    convention_table = """
+    CREATE TABLE convention(
+    id INT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+    data = """
+    INSERT INTO convention.convention (name, email)
+    VALUES
+        ("Venkat", "vramshesh@gmail.com"),
+
+    """
+    cursor.execute(drop_table)
+    cursor.execute(convention_table)
+    cursor.execute(data)
+
+# Write a function named `insert_person` which inserts person into the phonebook table in the db,
+# and returns text info about result of the operation
+def insert_person(name, email):
+    query = f"""
+    SELECT * FROM convention WHERE name like '{name.strip().lower()}';
+    """
+    cursor.execute(query)
+    row = cursor.fetchone()
+    if row is not None:
+        return f'Person with name {row[1].title()} already exists.'
+
+    insert = f"""
+    INSERT INTO convention (name, emailr)
+    VALUES ('{name.strip().lower()}', '{email}');
+    """
+    cursor.execute(insert)
+    result = cursor.fetchall()
+    return f'Person {name.strip().title()} added to convention successfully'
+
+
+@app.route('/',methods=["GET","POST"])
 def home():
     form = SubmitForm()
-    flag = True
-    raffle_inputs = dynamodb.Table('raffle')
-    if form.validate_on_submit():
-        response = raffle_inputs.scan()['Items']
-        for items in response:   # Check to see if that email is already registered
-            if form.email.data==items['email']:
-                flag = False
-                return render_template('error.html')
-                print("User already registered")
-
-        if flag:
-           raffle_inputs.put_item(Item={
-           'email': form.email.data,
-           'name': form.name.data })
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        result = insert_person(name, email)
     return render_template('index.html',form=form)
 
-@application.route('/error')
-def error():
-    return render_template('error.html')
 
 if __name__=="__main__":
-     application.run(debug=True)
+    init_convention_db()
+    #application.run(debug=True)
+    app.run(host='0.0.0.0', port=80)
 
 
