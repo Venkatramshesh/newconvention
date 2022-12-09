@@ -10,14 +10,13 @@ from botocore.exceptions import ClientError
 from flaskext.mysql import MySQL
 
 
-secret_name = "convention"
 region_name = "us-east-1"
 access_key = os.getenv('accesskeyid')
 access_secret = os.environ.get('accesskeysecret')
 # Create a Secrets Manager client
 session = boto3.session.Session()
 
-
+secret_name = "convention"
 client = session.client(service_name='secretsmanager', region_name=region_name,aws_access_key_id=access_key, aws_secret_access_key=access_secret)
 
 try:
