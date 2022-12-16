@@ -17,7 +17,7 @@ session = boto3.session.Session()
 boto3.setup_default_session(profile_name='iamadmin-production')
 client = boto3.client(service_name='secretsmanager')
 
-secret_name = "convention"
+secret_name = "convention1"
 
 try:
     get_secret_value_response = client.get_secret_value(SecretId=secret_name)
