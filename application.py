@@ -11,13 +11,13 @@ from flaskext.mysql import MySQL
 
 
 region_name = "us-east-1"
-access_key = os.getenv('accesskeyid')
-access_secret = os.environ.get('accesskeysecret')
+
 # Create a Secrets Manager client
 session = boto3.session.Session()
+boto3.setup_default_session(profile_name='iamadmin-production')
+client = boto3.client(service_name='secretsmanager')
 
 secret_name = "convention"
-client = session.client(service_name='secretsmanager', region_name=region_name,aws_access_key_id=access_key, aws_secret_access_key=access_secret)
 
 try:
     get_secret_value_response = client.get_secret_value(SecretId=secret_name)
@@ -29,12 +29,13 @@ except ClientError as e:
     # Decrypts secret using the associated KMS key.
 secret = get_secret_value_response['SecretString']
 
+
 app = Flask(__name__)
 Bootstrap(app)
 app.config['SECRET_KEY'] = 'jCOo4PAnmU6A0j2lpKeI-A'
 
 db_endpoint = open("/home/ec2-user/dbserver.endpoint", 'r', encoding='UTF-8')
-#db_endpoint="aws-database-web.cax8xbchtiwa.us-east-1.rds.amazonaws.com"
+#db_endpoint="database-1.cluster-cax8xbchtiwa.us-east-1.rds.amazonaws.com"
 # Configure mysql database
 app.config['MYSQL_DATABASE_HOST'] = db_endpoint.readline().strip()
 app.config['MYSQL_DATABASE_USER'] = 'admin'
@@ -42,12 +43,13 @@ app.config['MYSQL_DATABASE_PASSWORD'] = secret[13:29]
 app.config['MYSQL_DATABASE_DB'] = 'convention'
 app.config['MYSQL_DATABASE_PORT'] = 3306
 #db_endpoint.close()
-
+#
 mysql = MySQL()
 mysql.init_app(app)
 connection = mysql.connect()
 connection.autocommit(True)
 cursor = connection.cursor()
+#print(connection)
 
 def init_convention_db():
     drop_table = 'DROP TABLE IF EXISTS convention.convention;'
@@ -62,7 +64,7 @@ def init_convention_db():
     data = """
     INSERT INTO convention.convention (name, email)
     VALUES
-        ("Venkat", "vramshesh@gmail.com"),
+        ("Venkat", "vramshesh@gmail.com");
 
     """
     cursor.execute(drop_table)
@@ -81,7 +83,7 @@ def insert_person(name, email):
         return f'Person with name {row[1].title()} already exists.'
 
     insert = f"""
-    INSERT INTO convention (name, emailr)
+    INSERT INTO convention (name, email)
     VALUES ('{name.strip().lower()}', '{email}');
     """
     cursor.execute(insert)
