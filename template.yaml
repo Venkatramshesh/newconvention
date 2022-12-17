@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::SecretsManager-2020-07-23
+
+Parameters:
+  InstanceType:
+    Description: WebServer EC2 instance type (has default, AllowedValues)
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t3.medium
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  BucketName:
+    Type: String
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. Linked to AWS Parameter
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+
+Resources:
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      AccessControl: Private
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  RDSSecretsManager:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: AWS RDS admin credentials
+      Name: conventions
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  myVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.16.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  IPv6CidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      AmazonProvidedIpv6CidrBlock: true
+
+  myInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: myVPC
+    Properties:
+      Tags:
+      - Key: Name
+        Value: IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref myVPC
+      InternetGatewayId: !Ref myInternetGateway
+
+  EgressOnlyInternetGateway:
+    Type: AWS::EC2::EgressOnlyInternetGateway
+    Properties:
+      VpcId: !Ref myVPC
+
+  mySubnetA:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.0.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '01::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      MapPublicIpOnLaunch: true
+      AssignIpv6AddressOnCreation: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Web-A
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Enable HTTP access via port 80 + SSH access"
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      - CidrIp: !Ref SSHLocation
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      SecurityGroupEgress:
+      - CidrIp: '0.0.0.0/0'
+        IpProtocol: -1
+      VpcId: !Ref myVPC
+
+  BastionSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref myVPC
+      GroupDescription: Bastion host SSH Security Group
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref SSHLocation
+      SecurityGroupEgress:
+      - CidrIp: '0.0.0.0/0'
+        IpProtocol: -1
+
+
+  myLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-launch-template
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            Groups:
+              - !Ref WebServerSecurityGroup
+        Placement:
+          Tenancy: default
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        ImageId: !Ref ImageId
+        UserData:
+          Fn::Base64:
+            !Sub
+            - | 
+              #! /bin/bash
+              yum update -y
+              yum install python3 -y
+              pip3 install flask
+              pip3 install flask-WTF
+              pip3 install flask_mysql
+              pip3 install -U Flask-SQLAlchemy
+              pip3 install form
+              pip3 install flask-bootstrap
+              pip3 install boto3
+              pip3 install flask-mysql
+              echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
+              FOLDER="https://raw.github.com/kris1878/newconvention/master/"
+              curl -s --create-dirs -o "/home/ec2-user/static/img/Image.gif" -L "$FOLDER"static/img/Image.gif
+              curl -s --create-dirs -o "/home/ec2-user/static/img/Image.png" -L "$FOLDER"static/img/Image.png
+              curl -s --create-dirs -o "/home/ec2-user/templates/index.html" -L "$FOLDER"templates/index.html
+              curl -s --create-dirs -o "/home/ec2-user/templates/error.html" -L "$FOLDER"templates/error.html
+              curl -s --create-dirs -o "/home/ec2-user/form.py" -L "$FOLDER"form.py
+              curl -s --create-dirs -o "/home/ec2-user/app.py" -L "$FOLDER"application.py
+              python3 /home/ec2-user/app.py
+            - MyDBURI: !GetAtt RDSDBInstance.Endpoint.Address
+
+
+  mySubnetB:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.16.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '02::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      MapPublicIpOnLaunch: true
+      AssignIpv6AddressOnCreation: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Web-B
+
+  mySubnetC:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.32.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '03::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: false
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-App-A
+
+  ApplicationEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: !Ref ImageId
+      SubnetId: !Ref mySubnetC
+      IamInstanceProfile: !Ref SSMProfile
+
+  SSMProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref SSMIAMRole
+
+  SSMIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  BastionHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub bastion-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sts:AssumeRole'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+                - 'ssm.amazonaws.com'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM'
+      Policies:
+        - PolicyName: inline-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:*
+                  - s3:*
+                  - ssm:*
+                  - kms:*
+                  - secretsmanager:*
+                  - rds-db:connect
+                Resource: "*"
+
+  BastionHostprofile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref BastionHostRole
+
+  BastionEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: !Ref ImageId
+      SubnetId: !Ref mySubnetB
+      SecurityGroupIds: [ !Ref BastionSecGroup ]
+      IamInstanceProfile: !Ref BastionHostprofile
+
+  mySubnetD:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.48.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '04::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: false
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-App-B
+
+  mySubnetE:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.64.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '05::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: false
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-DB-A
+
+  mySubnetF:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: 10.16.80.0/20
+      Ipv6CidrBlock:
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '06::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt myVPC.Ipv6CidrBlocks ]]]
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: false
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-DB-B
+
+  myRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref myVPC
+      Tags:
+      - Key: Name
+        Value: myRouteTable
+
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref myVPC
+
+  myRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+       RouteTableId: !Ref myRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       GatewayId: !Ref myInternetGateway
+
+  myRouteIP6:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref myRouteTable
+      DestinationIpv6CidrBlock: ::/0
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
+
+  mySubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetA
+      RouteTableId: !Ref myRouteTable
+
+  mySubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetB
+      RouteTableId: !Ref myRouteTable
+
+  NATGateway:
+   Type: AWS::EC2::NatGateway
+   Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref mySubnetA
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-NATG
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  RouteNATGateway:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NATGateway
+
+  mySubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetC
+      RouteTableId: !Ref PrivateRT
+
+  mySubnetDRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref mySubnetD
+      RouteTableId: !Ref PrivateRT
+
+  RDSSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Database instances security group"
+      VpcId: !Ref myVPC
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+      - SourceSecurityGroupId: !Ref BastionSecGroup
+        IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+      - IpProtocol: "-1"
+        FromPort: 0
+        ToPort: 0
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+
+  RDSDBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: "Subnet Group for RDS database"
+      DBSubnetGroupName: !Sub "${AWS::Region}-aws-database-subnet-group"
+      SubnetIds:
+        - !Ref mySubnetE
+        - !Ref mySubnetF
+
+  RDSDBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: aws-database-web
+      AllocatedStorage: 20
+      DBInstanceClass: db.t2.micro
+      Engine: "MYSQL"
+      DBName: "convention"
+      MasterUsername: !Sub '{{resolve:secretsmanager:${RDSSecretsManager}::username}}'
+      MasterUserPassword: 123abc79 #!Sub '{{resolve:secretsmanager:${RDSSecretsManager}::password}}'
+      StorageType: gp2
+      DBSubnetGroupName: !Ref RDSDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+
+  SecretRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref RDSSecretsManager
+      TargetId: !Ref RDSDBInstance
+      TargetType: AWS::RDS::DBInstance
+
+  SecretRDSRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: SecretRDSInstanceAttachment
+    Properties:
+      SecretId: !Ref RDSSecretsManager
+      HostedRotationLambda:
+        RotationType: MySQLSingleUser
+        RotationLambdaName: SecretsManagerRotation
+        VpcSecurityGroupIds:
+          !GetAtt RDSSecurityGroup.GroupId
+        VpcSubnetIds:
+          Fn::Join:
+          - ","
+          - - Ref: mySubnetE
+            - Ref: mySubnetF
+      RotationRules:
+        AutomaticallyAfterDays: 30
+
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      SubnetIds:
+      - !Ref mySubnetE
+      - !Ref mySubnetF
+      SecurityGroupIds:
+      - !Ref RDSSecurityGroup
+      VpcEndpointType: 'Interface'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      PrivateDnsEnabled: true
+      VpcId: !Ref myVPC
+
+
+  myAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - !Ref mySubnetA
+      - !Ref mySubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref myLaunchTemplate
+        Version: !GetAtt myLaunchTemplate.LatestVersionNumber
+      MaxSize: '5'
+      MinSize: '2'
+      DesiredCapacity: '3'
+      TargetGroupARNs:
+      - !Ref ALBTargetGroup
+
+  ApplicationLoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: "test-Application-Load-Balancer"
+      Scheme: "internet-facing"
+      Type: "application"
+      Subnets:
+      - !Ref mySubnetA
+      - !Ref mySubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      IpAddressType: "ipv4"
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: !Ref myVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  ALBTargetGroup:
+   Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+   Properties:
+     HealthCheckIntervalSeconds: 6
+     HealthCheckTimeoutSeconds: 5
+     HealthyThresholdCount: 2
+     Port: 80
+     Protocol: HTTP
+     UnhealthyThresholdCount: 2
+     VpcId: !Ref myVPC
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub
+        - 'http://${ALBAddress}'
+        - ALBAddress: !GetAtt ApplicationLoadBalancer.DNSName
+    Description: Application Endpoint
+
