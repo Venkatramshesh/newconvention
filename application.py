@@ -10,24 +10,24 @@ from botocore.exceptions import ClientError
 from flaskext.mysql import MySQL
 
 
-region_name = "us-east-1"
+#region_name = "us-east-1"
 
 # Create a Secrets Manager client
-session = boto3.session.Session()
-boto3.setup_default_session(profile_name='iamadmin-production')
-client = boto3.client(service_name='secretsmanager')
+#session = boto3.session.Session()
+#boto3.setup_default_session(profile_name='iamadmin-production')
+#client = boto3.client(service_name='secretsmanager')
 
-secret_name = "conventions"
+#secret_name = "conventions"
 
-try:
-    get_secret_value_response = client.get_secret_value(SecretId=secret_name)
-except ClientError as e:
+#try:
+#    get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+#except ClientError as e:
         # For a list of exceptions thrown, see
         # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
-    raise e
+ #   raise e
 
     # Decrypts secret using the associated KMS key.
-secret = get_secret_value_response['SecretString']
+#secret = get_secret_value_response['SecretString']
 
 
 app = Flask(__name__)
@@ -39,7 +39,7 @@ db_endpoint = open("/home/ec2-user/dbserver.endpoint", 'r', encoding='UTF-8')
 # Configure mysql database
 app.config['MYSQL_DATABASE_HOST'] = db_endpoint.readline().strip()
 app.config['MYSQL_DATABASE_USER'] = 'admin'
-app.config['MYSQL_DATABASE_PASSWORD'] = secret[13:29]
+app.config['MYSQL_DATABASE_PASSWORD'] = '123abc79'
 app.config['MYSQL_DATABASE_DB'] = 'convention'
 app.config['MYSQL_DATABASE_PORT'] = 3306
 #db_endpoint.close()
